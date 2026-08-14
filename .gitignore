@@ -1,0 +1,10 @@
+.venv/
+build/
+dist/
+__pycache__/
+.coverage
+.DS_Store
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.superpowers/

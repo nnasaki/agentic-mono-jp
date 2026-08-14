@@ -1,0 +1,173 @@
+name: Release Agentic Mono JP AI CLI font
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+        timeout-minutes: 2
+
+      - name: Download and install upstream fonts
+        shell: bash
+        timeout-minutes: 5
+        env:
+          UPSTREAM_URL: https://github.com/yuru7/moralerspace/releases/download/v2.0.0/MoralerspaceHW_v2.0.0.zip
+          UPSTREAM_SHA256: 500a7774297c829265ebd472b6d8c1159cfb3e9daa4ca0570170af541b991b7d
+          UPSTREAM_DIR: MoralerspaceHW_v2.0.0
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/Library/Fonts" "$RUNNER_TEMP/upstream"
+          archive="$RUNNER_TEMP/MoralerspaceHW_v2.0.0.zip"
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            --connect-timeout 20 \
+            --max-time 120 \
+            --output "$archive" \
+            "$UPSTREAM_URL"
+          printf '%s  %s\n' "$UPSTREAM_SHA256" "$archive" | sha256sum -c -
+          unzip -q "$archive" -d "$RUNNER_TEMP/upstream"
+          source_dir="$RUNNER_TEMP/upstream/$UPSTREAM_DIR"
+          test -d "$source_dir"
+          for style in Regular Bold Italic BoldItalic; do
+            source_font="$source_dir/MoralerspaceNeonHW-$style.ttf"
+            destination_font="$HOME/Library/Fonts/MoralerspaceNeonHW-$style.ttf"
+            test -f "$source_font"
+            cp "$source_font" "$destination_font"
+            test -f "$destination_font"
+          done
+
+      - name: Install Python dependencies
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python -m pip install -r requirements.txt
+
+      - name: Build fonts
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python make.py build
+          test "$(find build -maxdepth 1 -name 'AgenticMonoJP-*.ttf' -type f | wc -l)" -eq 4
+
+      - name: Run tests
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -v
+
+      - name: Verify generated fonts
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python verify.py build
+
+      - name: Verify validation controls
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python verify.py build --control
+
+      - name: Render sample
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python render_sample.py build
+
+      - name: Verify sample PNG
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          from PIL import Image
+
+          sample = Path("build/sample.png")
+          if not sample.is_file():
+              raise SystemExit(f"sample PNG not found: {sample}")
+          with Image.open(sample) as image:
+              if image.format != "PNG":
+                  raise SystemExit(f"unexpected sample format: {image.format}")
+              if image.width <= 0 or image.height <= 0:
+                  raise SystemExit("sample PNG has invalid dimensions")
+              image.verify()
+          PY
+
+      - name: Package release
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          release_name="AgenticMonoJP-${GITHUB_REF_NAME}"
+          release_zip_name="${release_name}.zip"
+          release_dir="dist/${release_name}"
+          rm -rf dist
+          mkdir -p "$release_dir"
+          for style in Regular Bold Italic BoldItalic; do
+            cp "build/AgenticMonoJP-$style.ttf" "$release_dir/"
+          done
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$release_dir/"
+          test "$(find "$release_dir" -type f | wc -l)" -eq 7
+          (
+            cd dist
+            zip -q -r "$release_zip_name" "$release_name"
+            sha256sum "$release_zip_name" > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+          expected_entries=$(printf '%s\n' \
+            "$release_name/AgenticMonoJP-Regular.ttf" \
+            "$release_name/AgenticMonoJP-Bold.ttf" \
+            "$release_name/AgenticMonoJP-Italic.ttf" \
+            "$release_name/AgenticMonoJP-BoldItalic.ttf" \
+            "$release_name/LICENSE" \
+            "$release_name/THIRD_PARTY_NOTICES.md" \
+            "$release_name/README.md" | sort)
+          actual_entries=$(unzip -Z1 "dist/$release_zip_name" | sed '/\/$/d' | sort)
+          test "$actual_entries" = "$expected_entries"
+          ! unzip -Z1 "dist/$release_zip_name" | grep -E \
+            '(^|/)(sample\.png|MoralerspaceNeonHW-.*\.ttf)$'
+
+      - name: Create GitHub Release
+        shell: bash
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/AgenticMonoJP-${GITHUB_REF_NAME}.zip" \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --title "Agentic Mono JP $GITHUB_REF_NAME" \
+            --generate-notes
